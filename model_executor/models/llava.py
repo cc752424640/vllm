@@ -14,7 +14,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.weight_utils import default_weight_loader
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -96,7 +97,7 @@ class LlavaForConditionalGeneration(nn.Module):
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = Sampler()
+        self.sampler = Sampler(config.vocab_size)
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
 
     def forward(
@@ -204,8 +205,11 @@ class LlavaForConditionalGeneration(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # only doing this for language model part for now.
+    def load_weights(self,
+                     model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -215,30 +219,31 @@ class LlavaForConditionalGeneration(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
-            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-                if key_to_modify in name:
-                    name = name.replace(key_to_modify, new_key)
-            use_default_weight_loading = False
-            if "vision" in name:
-                if self.vision_tower is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
-                    use_default_weight_loading = True
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
+                # Models trained using ColossalAI may include these tensors in
+                # the checkpoint. Skip them.
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
             else:
-                for (param_name, weight_name,
-                     shard_id) in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    param = params_dict[name.replace(weight_name, param_name)]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    use_default_weight_loading = True
-            if use_default_weight_loading:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

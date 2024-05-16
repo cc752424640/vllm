@@ -8,7 +8,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
 
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
+                         ParallelConfig, SchedulerConfig, LoRAConfig, VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
@@ -74,6 +74,7 @@ class LLMEngine:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
     ) -> None:
@@ -105,6 +106,7 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.log_stats = log_stats
+        self.vision_language_config = vision_language_config
         self._verify_args()
 
         self._init_tokenizer()
@@ -158,6 +160,7 @@ class LLMEngine:
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
@@ -371,7 +374,8 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats
+        )
         return engine
 
     def encode_request(
